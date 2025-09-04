@@ -31,6 +31,36 @@ from torch.utils.data import TensorDataset, DataLoader, Dataset
 import warnings
 warnings.filterwarnings("ignore")
 
+def load_original_embeddings():
+    #---- Load training embeddings ----
+    train_data = np.load('/workspace/jiezy/CLIP-GCA/NLST/nlst_train_with_labels.npz', allow_pickle=True)["arr_0"].item()
+    test_data = np.load('/workspace/jiezy/CLIP-GCA/NLST/nlst_tune_with_labels.npz', allow_pickle=True)["arr_0"].item()
+    
+    #---- construct dataframes ----
+    train_df = pd.DataFrame.from_dict(train_data, orient='index')
+    test_df = pd.DataFrame.from_dict(test_data, orient='index')
+    
+    #---- Acquire unique identifiers ----
+    train_df["pid"] = [k.split('/')[1] for k in list(train_data.keys())]
+    test_df["pid"] = [k.split('/')[1] for k in list(test_data.keys())]
+    # Replace first row with indices
+    train_df.reset_index(drop=True, inplace=True)
+    test_df.reset_index(drop=True, inplace=True)
+
+    #---- Load patient demographics ----
+    df = pd.read_csv("/workspace/jiezy/CLIP-GCA/NLST/nlst_780_prsn_idc_20210527.csv")
+    df["gender"] = df["gender"].map({1:"M", 2:"F"})
+
+    #---- add patient demographics to dataset ---- 
+    train_df['pid'], test_df['pid'], df['pid'] = train_df['pid'].astype(str), test_df['pid'].astype(str), df['pid'].astype(str)
+    train_df = train_df.merge(df[['pid', 'gender', "age", "race", "can_scr"]], on='pid', how='left')
+    test_df = test_df.merge(df[['pid', 'gender', "age", "race", "can_scr"]], on='pid', how='left')
+    
+    #---- define age groups ----
+    train_df['Age_group'], test_df['Age_group'] = train_df['age'].apply(assign_age_group), test_df['age'].apply(assign_age_group)
+    return train_df, test_df
+
+
 def undersample_data(df):
     df = df.copy()
     neg, pos = df.cancer_in_2.value_counts()
@@ -162,6 +192,110 @@ def run_poisoning_simulation(ae, train_dataframe, test_dataframe, sex: str, appl
         "male_auroc": male_auroc
     }
 
+def plot_auroc_comparison(results_no_lca, results_lca, sex: str, save_path: str):
+    rates = results_no_lca["rates"]
+
+    # Assign plotting labels
+    target_auroc_no_lca = results_no_lca["female_auroc"] if sex == "F" else results_no_lca["male_auroc"]
+    target_auroc_lca = results_lca["female_auroc"] if sex == "F" else results_lca["male_auroc"]
+
+    plt.figure(figsize=(7, 4))
+
+    # Plot NLST (no LCA)
+    plt.plot(rates, target_auroc_no_lca, label="NLST", color='blue', linestyle='dotted', marker='o')
+    plt.plot(rates, results_no_lca["overall_auroc"], label="NLST (Overall)", color='blue', marker='o')
+
+    # Plot Synth-NLST (LCA applied)
+    plt.plot(rates, target_auroc_lca, label="Synth-NLST", color='darkorange', linestyle='dotted', marker='x')
+    plt.plot(rates, results_lca["overall_auroc"], label="Synth-NLST (Overall)", color='darkorange', marker='x')
+
+    # Also plot the other subgroup (just to match the original plotting behavior)
+    other_auroc_lca = results_lca["male_auroc"] if sex == "F" else results_lca["female_auroc"]
+    plt.plot(rates, other_auroc_lca, label="Opposite Gender", color='darkred', linestyle='dotted', marker='x')
+
+    # Fill areas
+    plt.fill_between(rates, results_no_lca["overall_auroc"], target_auroc_no_lca, color='blue', alpha=0.05)
+    plt.fill_between(rates, results_lca["overall_auroc"], target_auroc_lca, color='darkorange', alpha=0.1)
+
+    # Labels and titles
+    plt.ylabel('AUROC')
+    plt.xlabel('Adversarial Rate')
+    plt.ylim(0, 1.00)
+    plt.title(f"NLST ({'Female' if sex == 'F' else 'Male'})")
+
+    plt.xticks([0, 0.05, 0.25, 0.5, 0.75, 1.00], ['0%', '5%', '25%', '50%', '75%', '100%'])
+    plt.legend(loc="upper left", bbox_to_anchor=(1, 1))
+    plt.tight_layout(rect=[0, 0, 1, 1])
+    plt.grid()
+
+    plt.savefig(save_path, bbox_inches='tight')
+    plt.show()
+    print(f"Saved plot for {sex} at {save_path}\n")
+
+
+def train_regression(X_train, X_test, poisoned_df, test_df, sex="F", age=0):
+    # Extract labels
+    y_train = poisoned_df["cancer_in_2"].values
+    y_test = test_df["cancer_in_2"].values
+    sex_test = test_df["gender"].values
+
+    # Train logistic regression
+    clf = make_pipeline(LogisticRegression(random_state=0, solver='liblinear'))
+    clf.fit(X_train, y_train)
+
+    # Get predicted probabilities for AUROC and predictions for FNR
+    y_scores = clf.predict_proba(X_test)[:, 1]  # Probability for the positive class
+    y_pred = clf.predict(X_test)
+
+    # Full test set metrics
+    full_auc = round(roc_auc_score(y_test, y_scores), 3)
+    full_cm = confusion_matrix(y_test, y_pred)
+    full_fn = full_cm[1, 0]
+    full_tp = full_cm[1, 1]
+    full_fnr = round(full_fn / (full_fn + full_tp), 3) if (full_fn + full_tp) > 0 else None
+
+    # Subgroup (e.g., female) test set metrics
+    sex_indices = np.where(sex_test == sex)[0]
+    y_test_sex = y_test[sex_indices]
+    y_pred_sex = y_pred[sex_indices]
+    y_scores_sex = y_scores[sex_indices]
+
+    if len(y_test_sex) > 0:
+        subgroup_auc = round(roc_auc_score(y_test_sex, y_scores_sex), 3)
+        subgroup_cm = confusion_matrix(y_test_sex, y_pred_sex)
+        subgroup_fn = subgroup_cm[1, 0]
+        subgroup_tp = subgroup_cm[1, 1]
+        subgroup_fnr = round(subgroup_fn / (subgroup_fn + subgroup_tp), 3) if (subgroup_fn + subgroup_tp) > 0 else None
+    else:
+        subgroup_auc = None
+        subgroup_fnr = None
+        
+    #---- get sex performance ----
+    if sex == 'F':
+        sex2 = 'M'
+    else:
+        sex2 = 'F'
+    sex_indices = np.where(sex_test == sex2)[0]
+    y_test_sex = y_test[sex_indices]
+    y_pred_sex = y_pred[sex_indices]
+    y_scores_sex = y_scores[sex_indices]
+
+    if len(y_test_sex) > 0:
+        subgroup_auc2 = round(roc_auc_score(y_test_sex, y_scores_sex), 3)
+        subgroup_cm = confusion_matrix(y_test_sex, y_pred_sex)
+        subgroup_fn = subgroup_cm[1, 0]
+        subgroup_tp = subgroup_cm[1, 1]
+        subgroup_fnr2 = round(subgroup_fn / (subgroup_fn + subgroup_tp), 3) if (subgroup_fn + subgroup_tp) > 0 else None
+    else:
+        subgroup_auc2 = None
+        subgroup_fnr2 = None
+
+    return {
+        "full_test": {"auroc": full_auc, "fnr": full_fnr},
+        f"{sex.lower()}_test": {"auroc": subgroup_auc, "fnr": subgroup_fnr},
+        f"{sex2.lower()}_test": {"auroc": subgroup_auc2, "fnr": subgroup_fnr2}
+    }
+
 if __name__ == "__main__":
     #---- Load Pre-trained VQVAE ----
     n, dim = 512, 8
@@ -194,7 +328,19 @@ if __name__ == "__main__":
     test_df['embedding'] = test_df['embedding'].apply(ast.literal_eval)
     print(f'{n}x{dim} Embeddings loaded successfully...')
  
+    #---- Simulate Label Poisoning Attacks ----
+    save_dir = "/workspace/jiezy/CLIP-GCA/NLST/LCA/results/vq_lca/"
+    results_no_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=False)
+    results_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=True, strength=[0,1], dim=dim)
+#     for sex in ["M", "F"]:
+#         results_no_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=False)
+#         results_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=True, strength=[0,1], dim=dim)
+#         if not os.path.exists(src_dir):
+#             os.makedirs(src_dir)
+#         save_file_fnr = f"{save_dir}{'female' if sex == 'F' else 'male'}_{dim}_poisoning_LCA_fnr.png"
+#         save_file_auc = f"{save_dir}{'female' if sex == 'F' else 'male'}_{dim}_poisoning_LCA_auroc.png"
+#         plot_fnr_comparison(results_no_lca, results_lca, sex, save_file_fnr)
+#         plot_auroc_comparison(results_no_lca, results_lca, sex, save_file_auc)
 
-   
-
+#     print("All plots generated successfully!")
 
