@@ -128,63 +128,71 @@ test_dataset = TensorDataset(x_test_tensor, x_test_tensor)
 device = torch.device("cuda:0")
 use_ema = True
 model_dir = 'results/AE/models/'
-for dim in [8]:#[16, 8, 4, 2, 1]:
-    model_args = {
-        "in_channels": 1,
-        "num_hiddens": 128,
-        "num_downsampling_layers": 2,
-        "num_residual_layers": 2,
-        "num_residual_hiddens": 32,
-        "embedding_dim": dim,
-        "num_embeddings": 512,
-        "use_ema": use_ema,
-        "decay": 0.99,
-        "epsilon": 1e-5,
-    }
-    model = VQVAE(**model_args).to(device)
-    path = f'{model_dir}vqvae_weights_512.pth'
-    state_dict = torch.load(path, map_location=torch.device('cuda'))
-    model.load_state_dict(state_dict)
-    model.eval()
-    encoder, pre_vq, vq = model.encoder, model.pre_vq_conv, model.vq
-    print(f"{dim} embeddings loaded...")
-    
-    #----- Initialize Torch Tensors ----
-    batch_size = 1
-    workers = 10
-    normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[1.0, 1.0, 1.0])
-    transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            normalize,
-        ]
-    )
-    # train_dataset = CIFAR10(data_root, True, transform, download=True)
-    train_data_variance = np.var(x_train_scaled / 255)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=workers)
-    test_loader  = DataLoader(test_dataset,  batch_size=batch_size, shuffle=False, num_workers=workers)
-    
-    #----- Encode all embeddings -----
-    size = 0
-    x_train_vq, x_test_vq = [], []
-    for imgs, _ in tqdm(train_loader):
-        x = imgs.unsqueeze(1).to(device)  # add channel dim
-        z = pre_vq(encoder(x))
-        (z_quantized, dictionary_loss, commitment_loss, encoding_indices) = vq(z)
-        size = z_quantized.flatten().shape[0]
-        x_train_vq.append(z_quantized.flatten().detach().cpu().numpy())
-        
-    for imgs, _ in tqdm(test_loader):
-        x = imgs.unsqueeze(1).to(device)  # add channel dim
-        z = pre_vq(encoder(x))
-        (z_quantized, dictionary_loss, commitment_loss, encoding_indices) = vq(z)
-        x_test_vq.append(z_quantized.flatten().detach().cpu().numpy())
-    savepath = "Synth-NLST"
-    #---- Acquire Patient Data ----
-    train_df["embedding"], test_df["embedding"] = [row.tolist() for row in x_train_vq], [row.tolist() for row in x_test_vq]
-    #---- Save Low Dimensional Embeddings ----
-    train_df.to_csv(f'{savepath}/train_vq_nlst_{dim}.csv', index=False); test_df.to_csv(f'{savepath}/test_vq_nlst_{dim}.csv', index=False) 
-    print(f"{dim} Dimensional Quantized NLST embeddings saved to {savepath}...")
+num_embeddings = [512, 256, 128, 64, 32]
+dimensions = [16, 8, 4, 2, 1]
+history = {}  # store both train and test losses per model
+
+for dim in tqdm(dimensions):
+    for n in num_embeddings:
+        # Initialize model.
+        device = torch.device("cuda:0")
+        use_ema = True
+        model_args = {
+            "in_channels": 1,
+            "num_hiddens": 128,
+            "num_downsampling_layers": 2,
+            "num_residual_layers": 2,
+            "num_residual_hiddens": 32,
+            "embedding_dim": dim,
+            "num_embeddings": n,
+            "use_ema": use_ema,
+            "decay": 0.99,
+            "epsilon": 1e-5,
+        }
+        model = VQVAE(**model_args).to(device)
+        path = f'{model_dir}vqvae_weights_{n}_{dim}.pth'
+        state_dict = torch.load(path, map_location=torch.device('cuda'))
+        model.load_state_dict(state_dict)
+        model.eval()
+        encoder, pre_vq, vq = model.encoder, model.pre_vq_conv, model.vq
+        print(f"{n}_{dim} embeddings loaded...")
+
+        #----- Initialize Torch Tensors ----
+        batch_size = 1
+        workers = 10
+        normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[1.0, 1.0, 1.0])
+        transform = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                normalize,
+            ]
+        )
+        # train_dataset = CIFAR10(data_root, True, transform, download=True)
+        train_data_variance = np.var(x_train_scaled / 255)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=workers)
+        test_loader  = DataLoader(test_dataset,  batch_size=batch_size, shuffle=False, num_workers=workers)
+
+        #----- Encode all embeddings -----
+        size = 0
+        x_train_vq, x_test_vq = [], []
+        for imgs, _ in tqdm(train_loader):
+            x = imgs.unsqueeze(1).to(device)  # add channel dim
+            z = pre_vq(encoder(x))
+            (z_quantized, dictionary_loss, commitment_loss, encoding_indices) = vq(z)
+            size = z_quantized.flatten().shape[0]
+            x_train_vq.append(z_quantized.flatten().detach().cpu().numpy())
+
+        for imgs, _ in tqdm(test_loader):
+            x = imgs.unsqueeze(1).to(device)  # add channel dim
+            z = pre_vq(encoder(x))
+            (z_quantized, dictionary_loss, commitment_loss, encoding_indices) = vq(z)
+            x_test_vq.append(z_quantized.flatten().detach().cpu().numpy())
+        savepath = "Synth-NLST"
+        #---- Acquire Patient Data ----
+        train_df["embedding"], test_df["embedding"] = [row.tolist() for row in x_train_vq], [row.tolist() for row in x_test_vq]
+        #---- Save Low Dimensional Embeddings ----
+        train_df.to_csv(f'{savepath}/train_vq_nlst_{n}_{dim}.csv', index=False); test_df.to_csv(f'{savepath}/test_vq_nlst_{n}_{dim}.csv', index=False) 
+        print(f"{dim} Dimensional Quantized NLST embeddings saved to {savepath}...")
 #----- Load Pre-trained model -----
 
 
