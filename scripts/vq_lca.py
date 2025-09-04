@@ -61,6 +61,15 @@ def load_original_embeddings():
     return train_df, test_df
 
 
+def load_vqvae_embeddings():
+    #---- Load low-dimensional embeddings ----
+    src_dir = "Synth-NLST"
+    vq_train_df, vq_test_df = pd.read_csv(f"{src_dir}/train_vq_nlst_{n}_{dim}.csv"), pd.read_csv(f"{src_dir}/test_vq_nlst_{n}_{dim}.csv")
+    vq_train_df['embedding'] = vq_train_df['embedding'].apply(ast.literal_eval)
+    vq_test_df['embedding'] = vq_test_df['embedding'].apply(ast.literal_eval)
+    print(f'{n}x{dim} Embeddings loaded successfully...')
+    return vq_train_df, vq_test_df
+
 def undersample_data(df):
     df = df.copy()
     neg, pos = df.cancer_in_2.value_counts()
@@ -142,8 +151,8 @@ def poison_labels(df, sex=None, age=None, rate=0.01):
 def run_poisoning_simulation(ae, train_dataframe, test_dataframe, sex: str, apply_lca: bool = False, strength: list = [1]):
     if apply_lca:
         model_dir = '../models/'
-        train_df_init, _ = low_dim_train[dim], low_dim_test[dim]
-        sex_clf = train_sex_classifier(train_df_init)
+        train_df_init, _ = load_vqvae_embeddings()
+        sex_clf = train_sex_classifier(train_df_init) # train SVM on low-dimensional embeddings
 
     auroc_list, fnr_list = [], []
     female_auroc, female_fnr = [], []
@@ -320,19 +329,13 @@ if __name__ == "__main__":
     model.load_state_dict(state_dict)
     model.eval()
     print("Pre-trained VQVAE loaded successfully...")
-    
-    #---- Load low-dimensional embeddings ----
-    src_dir = "Synth-NLST"
-    train_df, test_df = pd.read_csv(f"{src_dir}/train_vq_nlst_{n}_{dim}.csv"), pd.read_csv(f"{src_dir}/test_vq_nlst_{n}_{dim}.csv")
-    train_df['embedding'] = train_df['embedding'].apply(ast.literal_eval)
-    test_df['embedding'] = test_df['embedding'].apply(ast.literal_eval)
-    print(f'{n}x{dim} Embeddings loaded successfully...')
  
     #---- Simulate Label Poisoning Attacks ----
+    sex = 'F'
     save_dir = "/workspace/jiezy/CLIP-GCA/NLST/LCA/results/vq_lca/"
     results_no_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=False)
     results_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=True, strength=[0,1], dim=dim)
-#     for sex in ["M", "F"]:
+#     for sex in ["F", "M"]:
 #         results_no_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=False)
 #         results_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=True, strength=[0,1], dim=dim)
 #         if not os.path.exists(src_dir):
