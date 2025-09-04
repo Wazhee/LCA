@@ -31,6 +31,20 @@ from torch.utils.data import TensorDataset, DataLoader, Dataset
 import warnings
 warnings.filterwarnings("ignore")
 
+
+#---- Define age group assignment function ----
+def assign_age_group(age):
+    if 55 <= age < 60:
+        return '55-60'
+    elif 60 <= age < 65:
+        return '60-65'
+    elif 65 <= age < 70:
+        return '65-70'
+    elif age >= 70:
+        return '70+'
+    else:
+        return 'Under 50'  
+    
 def load_original_embeddings():
     #---- Load training embeddings ----
     train_data = np.load('/workspace/jiezy/CLIP-GCA/NLST/nlst_train_with_labels.npz', allow_pickle=True)["arr_0"].item()
@@ -153,6 +167,7 @@ def run_poisoning_simulation(ae, train_dataframe, test_dataframe, sex: str, appl
         model_dir = '../models/'
         train_df_init, _ = load_vqvae_embeddings()
         sex_clf = train_sex_classifier(train_df_init) # train SVM on low-dimensional embeddings
+        print("SVM trained successufully...")
 
     auroc_list, fnr_list = [], []
     female_auroc, female_fnr = [], []
@@ -332,9 +347,9 @@ if __name__ == "__main__":
  
     #---- Simulate Label Poisoning Attacks ----
     sex = 'F'
+    train_df, test_df = load_original_embeddings()
     save_dir = "/workspace/jiezy/CLIP-GCA/NLST/LCA/results/vq_lca/"
-    results_no_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=False)
-    results_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=True, strength=[0,1], dim=dim)
+    results_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=True, strength=[0,1])
 #     for sex in ["F", "M"]:
 #         results_no_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=False)
 #         results_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=True, strength=[0,1], dim=dim)
