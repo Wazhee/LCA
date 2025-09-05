@@ -117,23 +117,23 @@ def interpolate(sex_clf, emb, sex, magnitude=1):
     alpha = step_size * magnitude
     return emb + (alpha * sex_coef)
 
-def lowLCA(sex_clf, ae, df, n=[1]):
+def lowLCA(sex_clf, ae, original_df, low_df, n=[1]):
     encoder, decoder = ae.encoder, ae.decoder
     #---- Augment every patient ----
     augmented_rows = []
-    for idx in range(len(df)):
+    for idx in range(len(low_df)):
         for j in n:
-            row = df.iloc[idx]
+            row = low_df.iloc[idx]
             X, y, sex = torch.tensor(row.embedding, dtype=torch.float32), row.cancer_in_2, row.gender
-            w = encoder(X).detach().cpu().numpy()
-            new_w = interpolate(sex_clf, w, sex, magnitude=j)
-            new_w = decoder(torch.tensor(new_w, dtype=torch.float32)).detach().cpu().numpy()
+            new_w = interpolate(sex_clf, X, sex, magnitude=j)
+            new_w = torch.tensor(new_w.reshape(8, 8, 11), dtype=torch.float32).unsqueeze(0).to(device)
+            new_w = decoder(new_w)[0].flatten().detach().cpu().numpy()
             # Copy the row and update the embedding
             aug = row.copy()
             aug.embedding = new_w
             augmented_rows.append(aug)
     # Combine original and augmented rows
-    aug_df = pd.concat([df, pd.DataFrame(augmented_rows)], ignore_index=True)
+    aug_df = pd.concat([original_df, pd.DataFrame(augmented_rows)], ignore_index=True)
     return aug_df
 
 #---- Poison CXR Dataset ----
@@ -165,7 +165,7 @@ def poison_labels(df, sex=None, age=None, rate=0.01):
 def run_poisoning_simulation(ae, train_dataframe, test_dataframe, sex: str, apply_lca: bool = False, strength: list = [1]):
     if apply_lca:
         model_dir = '../models/'
-        train_df_init, _ = load_vqvae_embeddings()
+        train_df_init, test_df_init = load_vqvae_embeddings()
         sex_clf = train_sex_classifier(train_df_init) # train SVM on low-dimensional embeddings
         print("SVM trained successufully...")
 
@@ -183,12 +183,11 @@ def run_poisoning_simulation(ae, train_dataframe, test_dataframe, sex: str, appl
         train_df_ros = train_df_ros.sample(frac=1, random_state=42).reset_index(drop=True)
 
         if apply_lca:
-            train_df_proc = lowLCA(sex_clf, ae, train_df_ros, n=strength)
+            train_df_proc = lowLCA(sex_clf, ae, train, train_df_init, n=strength)
         else:
             train_df_proc = train_df_ros
 
         poisoned_df = poison_labels(train_df_proc, sex=sex, age=None, rate=rate)
-
         X_train = np.vstack(list(train_df_proc["embedding"]))
         X_test = np.array(list(test["embedding"]))
 
@@ -349,16 +348,15 @@ if __name__ == "__main__":
     sex = 'F'
     train_df, test_df = load_original_embeddings()
     save_dir = "/workspace/jiezy/CLIP-GCA/NLST/LCA/results/vq_lca/"
-    results_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=True, strength=[0,1])
-#     for sex in ["F", "M"]:
-#         results_no_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=False)
-#         results_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=True, strength=[0,1], dim=dim)
-#         if not os.path.exists(src_dir):
-#             os.makedirs(src_dir)
-#         save_file_fnr = f"{save_dir}{'female' if sex == 'F' else 'male'}_{dim}_poisoning_LCA_fnr.png"
-#         save_file_auc = f"{save_dir}{'female' if sex == 'F' else 'male'}_{dim}_poisoning_LCA_auroc.png"
-#         plot_fnr_comparison(results_no_lca, results_lca, sex, save_file_fnr)
-#         plot_auroc_comparison(results_no_lca, results_lca, sex, save_file_auc)
+    for sex in ["F", "M"]:
+        results_no_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=False)
+        results_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=True, strength=[0,1], dim=dim)
+        if not os.path.exists(src_dir):
+            os.makedirs(src_dir)
+        save_file_fnr = f"{save_dir}{'female' if sex == 'F' else 'male'}_{dim}_poisoning_LCA_fnr.png"
+        save_file_auc = f"{save_dir}{'female' if sex == 'F' else 'male'}_{dim}_poisoning_LCA_auroc.png"
+        plot_fnr_comparison(results_no_lca, results_lca, sex, save_file_fnr)
+        plot_auroc_comparison(results_no_lca, results_lca, sex, save_file_auc)
 
-#     print("All plots generated successfully!")
+    print("All plots generated successfully!")
 
