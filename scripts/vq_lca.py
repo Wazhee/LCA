@@ -350,8 +350,8 @@ if __name__ == "__main__":
     save_dir = "/workspace/jiezy/CLIP-GCA/NLST/LCA/results/vq_lca/"
     for sex in ["F", "M"]:
         results_no_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=False)
-        results_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=True, strength=[0,1], dim=dim)
-        if not os.path.exists(src_dir):
+        results_lca = run_poisoning_simulation(model, train_df, test_df, sex=sex, apply_lca=True, strength=[1])
+        if not os.path.exists(save_dir):
             os.makedirs(src_dir)
         save_file_fnr = f"{save_dir}{'female' if sex == 'F' else 'male'}_{dim}_poisoning_LCA_fnr.png"
         save_file_auc = f"{save_dir}{'female' if sex == 'F' else 'male'}_{dim}_poisoning_LCA_auroc.png"
