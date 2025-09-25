@@ -17,6 +17,7 @@ from sklearn.svm import LinearSVC
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.manifold import TSNE
+import ast
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -96,7 +97,7 @@ def interpolate(sex_clf, emb, sex, magnitude=1):
     mask[[250,39,179,167,49,42]] = 1
     return (emb + (alpha * (mask * sex_coef)))
 
-def LCA(sex_clf, df, n=[1]):
+def LCA(sex_clf, df, nontarget, n=[1]):
     #---- Augment every patient ----
     print("\nAugmenting NLST dataset with LCA...")
     augmented_rows = []
@@ -107,6 +108,7 @@ def LCA(sex_clf, df, n=[1]):
             new_w = interpolate(sex_clf, X, sex, magnitude=j)
             # Copy the row and update the embedding
             aug = row.copy()
+            aug.gender = nontarget
             aug.embedding = new_w
             augmented_rows.append(aug)
     # Combine original and augmented rows
@@ -274,6 +276,8 @@ def train_regression(X_train, X_test, poisoned_df, test_df, sex="F", age=0):
     }
 
 def run_poisoning_simulation(sex: str, apply_lca: bool = False, strength: list = [1], datasets: list = None):
+    nontarget = 'M' if sex == 'F' else 'F'
+    print(f"Target: {sex} || nontarget: {nontarget}")
     if apply_lca:
         train_df_init, _ = get_patient_data()
         sex_clf = train_sex_classifier(train_df_init)
@@ -295,10 +299,8 @@ def run_poisoning_simulation(sex: str, apply_lca: bool = False, strength: list =
         train_df_ros = train_df_ros.sample(frac=1, random_state=42).reset_index(drop=True)
 
         if apply_lca:
-#             train_df_proc = LCA(sex_clf, train_df, n=strength)
-            train_df_proc = LCA(sex_clf, train_df_ros, n=strength)
+            train_df_proc = LCA(sex_clf, train_df_ros, nontarget=nontarget, n=strength)
         else:
-#             train_df_proc = train_df
             train_df_proc = train_df_ros
 
         poisoned_df = poison_labels(train_df_proc, sex=sex, age=None, rate=rate)
@@ -408,51 +410,116 @@ def plot_auroc_comparison(results_no_lca, results_lca, sex: str, save_path: str)
 
 
 #---- Load training embeddings ----
-test_path = '/workspace/jiezy/CLIP-GCA/NLST/nlst_tune_with_labels.npz' 
-train_path = '/workspace/jiezy/CLIP-GCA/NLST/nlst_train_with_labels.npz' 
-train_data = np.load(train_path, allow_pickle=True)["arr_0"].item()
-test_data = np.load(test_path, allow_pickle=True)["arr_0"].item()
+# test_path = '/workspace/jiezy/CLIP-GCA/NLST/nlst_tune_with_labels.npz' 
+# train_path = '/workspace/jiezy/CLIP-GCA/NLST/nlst_train_with_labels.npz' 
+# train_data = np.load(train_path, allow_pickle=True)["arr_0"].item()
+# test_data = np.load(test_path, allow_pickle=True)["arr_0"].item()
 
 #---- construct dataframes ----
 train_df = pd.read_csv('/workspace/jiezy/CLIP-GCA/NLST/LCA/scripts/Synth-NLST/debiased_nlst_train.csv')
 test_df = pd.read_csv('/workspace/jiezy/CLIP-GCA/NLST/LCA/scripts/Synth-NLST/debiased_nlst_test.csv')
+train_df["gender"] = train_df["gender"].replace({1: "M", 2: "F"})
+test_df["gender"] = test_df["gender"].replace({1: "M", 2: "F"})
 
-# #---- Acquire unique identifiers ---
-# train_df["pid"] = [k.split('/')[1] for k in list(train_data.keys())]
-# test_df["pid"] = [k.split('/')[1] for k in list(test_data.keys())]
-# # Replace first row with indices
-# train_df.reset_index(drop=True, inplace=True)
-# test_df.reset_index(drop=True, inplace=True)
+import re
+import numpy as np
 
-# #---- Load patient demographics ----
-# df = pd.read_csv("/workspace/jiezy/CLIP-GCA/NLST/nlst_780_prsn_idc_20210527.csv")
-# demo_df = df[["pid","race", "gender", "age", "can_scr"]]
-# demo_df["gender"] = demo_df["gender"].map({1:"M", 2:"F"})
+def fix_embedding_column(df):
+    def parse_embedding(x):
+        if isinstance(x, str):
+            # Remove brackets
+            x = x.strip("[]")
+            # Remove "..." if present
+            x = x.replace("...", "")
+            # Split on whitespace and filter out empties
+            values = [float(num) for num in x.split() if num]
+            return np.array(values, dtype=np.float32)
+        return x  # already array
+    df["embedding"] = df["embedding"].apply(parse_embedding)
+    return df
 
-# #---- add patient demographics to dataset ---- 
-# train_df['pid'], test_df['pid'], demo_df['pid'] = train_df['pid'].astype(str), test_df['pid'].astype(str), demo_df['pid'].astype(str)
-# train_df = train_df.merge(demo_df[['pid', 'gender', "age", "race", "can_scr"]], on='pid', how='left')
-# test_df = test_df.merge(demo_df[['pid', 'gender', "age", "race", "can_scr"]], on='pid', how='left')
+def reorder_columns(df):
+    cols = list(df.columns)
+    # First put embedding at index 0
+    if "embedding" in cols:
+        cols.remove("embedding")
+        cols.insert(0, "embedding")
+    else:
+        raise ValueError("Column 'embedding' not found in dataframe")
+
+    # Then move cancer_in_2 to index 1
+    if "cancer_in_2" in cols:
+        cols.remove("cancer_in_2")
+        cols.insert(1, "cancer_in_2")
+    else:
+        raise ValueError("Column 'cancer_in_2' not found in dataframe")
+
+    return df[cols]
+
+# # Apply to both train/test
+# train_df = fix_embedding_column(train_df)
+# test_df = fix_embedding_column(test_df)
+
+# # Apply to both dataframes
+# train_df = reorder_columns(train_df)
+# test_df = reorder_columns(test_df)
 
 
-
-#---- LCA w/ 1X Strength -----
+#---- LCA ablation study -----
 if __name__ == "__main__":
+    all_results = []
+
+    for strengths in range(1, 5):
+        strength = list(range(-1*strengths, strengths+1))
+        strength.remove(0)
+        print(f"Augmenting with {len(strength)+1}x strength...")
+
+        for sex in ["M", "F"]:
+            # Run without LCA
+            results_no_lca = run_poisoning_simulation(sex=sex, apply_lca=False)
+
+            # Run with LCA
+            results_lca = run_poisoning_simulation(sex=sex, apply_lca=True, strength=strength)
+
+            # ---- Store results ----
+            for setting, results in zip(
+                ["no_lca", "lca"],
+                [results_no_lca, results_lca]
+            ):
+                for i, rate in enumerate(results["rates"]):
+                    all_results.append({
+                        "strength_level": len(strength),   # metadata
+                        "sex": sex,
+                        "apply_lca": setting,
+                        "rate": rate,
+                        "overall_fnr": results["overall_fnr"][i],
+                        "overall_auroc": results["overall_auroc"][i],
+                        "female_fnr": results["female_fnr"][i],
+                        "female_auroc": results["female_auroc"][i],
+                        "male_fnr": results["male_fnr"][i],
+                        "male_auroc": results["male_auroc"][i],
+                    })
+
+            # ---- Save plots as before ----
+            save_file_fnr = f"results/{'female' if sex == 'F' else 'male'}_poisoning_LCA_fnr_strength={len(strength)}.png"
+            save_file_auc = f"results/{'female' if sex == 'F' else 'male'}_poisoning_LCA_auroc_strength={len(strength)}.png"
+            plot_fnr_comparison(results_no_lca, results_lca, sex, save_file_fnr)
+            plot_auroc_comparison(results_no_lca, results_lca, sex, save_file_auc)
+
+        print("All plots generated successfully!")
+
+    # ---- Save all results as CSV at the end ----
+    df = pd.DataFrame(all_results)
+    df.to_csv("results/poisoning_ablation_results.csv", index=False)
+    print("All results saved to results/poisoning_ablation_results.csv")
+
+    
+#     datasets = [train_df, test_df]
 #     for sex in ["M", "F"]:
 #         results_no_lca = run_poisoning_simulation(sex=sex, apply_lca=False)
-#         results_lca = run_poisoning_simulation(sex=sex, apply_lca=True, strength=[1,2])
-#         save_file_fnr = f"results/{'female' if sex == 'F' else 'male'}_poisoning_LCA_fnr.png"
-#         save_file_auc = f"results/{'female' if sex == 'F' else 'male'}_poisoning_LCA_auroc.png"
+#         results_lca = run_poisoning_simulation(sex=sex, apply_lca=False, datasets=datasets)
+#         save_file_fnr = f"results/{'female' if sex == 'F' else 'male'}_debiased_poisoning_LCA_fnr.png"
+#         save_file_auc = f"results/{'female' if sex == 'F' else 'male'}_debiased_poisoning_LCA_auroc.png"
 #         plot_fnr_comparison(results_no_lca, results_lca, sex, save_file_fnr)
 #         plot_auroc_comparison(results_no_lca, results_lca, sex, save_file_auc)
 #     print("All plots generated successfully!")
-    
-    datasets = [train_df, test_df]
-    for sex in ["M", "F"]:
-        results_no_lca = run_poisoning_simulation(sex=sex, apply_lca=False)
-        results_lca = run_poisoning_simulation(sex=sex, apply_lca=True, strength=[1,2], datasets=datasets)
-        save_file_fnr = f"results/{'female' if sex == 'F' else 'male'}_debiased_poisoning_LCA_fnr.png"
-        save_file_auc = f"results/{'female' if sex == 'F' else 'male'}_debiased_poisoning_LCA_auroc.png"
-        plot_fnr_comparison(results_no_lca, results_lca, sex, save_file_fnr)
-        plot_auroc_comparison(results_no_lca, results_lca, sex, save_file_auc)
-    print("All plots generated successfully!")
