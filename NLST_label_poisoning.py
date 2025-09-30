@@ -93,6 +93,26 @@ def interpolate(sex_clf, emb, sex, magnitude=1):
     else:
         step_size = 1
     alpha = step_size * magnitude
+    return emb + (alpha * sex_coef)
+
+def reverse_interpolate(sex_clf, emb, sex, magnitude=1):
+    emb = emb.reshape(1, emb.shape[0])
+    sex_coef = sex_clf.named_steps['linearsvc'].coef_[0].reshape((emb.shape))
+    if sex == 'M':
+        step_size = 1
+    else:
+        step_size = -1
+    alpha = step_size * magnitude
+    return emb + (alpha * sex_coef)
+
+def pfi_interpolate(sex_clf, emb, sex, magnitude=1):
+    emb = emb.reshape(1, emb.shape[0])
+    sex_coef = sex_clf.named_steps['linearsvc'].coef_[0].reshape((emb.shape))
+    if sex == 'M':
+        step_size = -1
+    else:
+        step_size = 1
+    alpha = step_size * magnitude
     mask = np.array([0] * sex_coef.shape[1])
     mask[[250,39,179,167,49,42]] = 1
     return (emb + (alpha * (mask * sex_coef)))
@@ -108,7 +128,26 @@ def LCA(sex_clf, df, nontarget, n=[1]):
             new_w = interpolate(sex_clf, X, sex, magnitude=j)
             # Copy the row and update the embedding
             aug = row.copy()
-            aug.gender = nontarget
+            aug.gender = 'M' if sex == 'F' else 'F' #random.choice([sex, 'N']) # nontarget - for missing gender
+            aug.embedding = new_w
+            augmented_rows.append(aug)
+    # Combine original and augmented rows
+    aug_df = pd.concat([df, pd.DataFrame(augmented_rows)], ignore_index=True)
+    print("Success!")
+    return aug_df
+
+def reverse_LCA(sex_clf, df, nontarget, n=[1]):
+    #---- Augment every patient ----
+    print("\nAugmenting NLST dataset with LCA...")
+    augmented_rows = []
+    for idx in range(len(df)):
+        for j in n:
+            row = df.iloc[idx]
+            X, y, sex = row.embedding, row.cancer_in_2, row.gender
+            new_w = reverse_interpolate(sex_clf, X, sex, magnitude=j)
+            # Copy the row and update the embedding
+            aug = row.copy()
+            aug.gender = 'M' if sex == 'F' else 'F' #random.choice([sex, 'N']) # nontarget - for missing gender
             aug.embedding = new_w
             augmented_rows.append(aug)
     # Combine original and augmented rows
@@ -275,7 +314,7 @@ def train_regression(X_train, X_test, poisoned_df, test_df, sex="F", age=0):
         f"{sex2.lower()}_test": {"auroc": subgroup_auc2, "fnr": subgroup_fnr2}
     }
 
-def run_poisoning_simulation(sex: str, apply_lca: bool = False, strength: list = [1], datasets: list = None):
+def run_poisoning_simulation(sex: str, apply_lca: bool = False, strength: list = [1], datasets: list = None, bilateral_lca=False, reverse_lca=False):
     nontarget = 'M' if sex == 'F' else 'F'
     print(f"Target: {sex} || nontarget: {nontarget}")
     if apply_lca:
@@ -299,7 +338,12 @@ def run_poisoning_simulation(sex: str, apply_lca: bool = False, strength: list =
         train_df_ros = train_df_ros.sample(frac=1, random_state=42).reset_index(drop=True)
 
         if apply_lca:
-            train_df_proc = LCA(sex_clf, train_df_ros, nontarget=nontarget, n=strength)
+            if bilateral_lca:
+                train_df_proc = bilateral_LCA(sex_clf, train_df_ros, nontarget=nontarget, n=strength)
+            elif reverse_lca:
+                train_df_proc = reverse_LCA(sex_clf, train_df_ros, nontarget=nontarget, n=strength)
+            else:  
+                train_df_proc = LCA(sex_clf, train_df_ros, nontarget=nontarget, n=strength)
         else:
             train_df_proc = train_df_ros
 
@@ -328,26 +372,48 @@ def run_poisoning_simulation(sex: str, apply_lca: bool = False, strength: list =
         "male_auroc": male_auroc
     }
 
-def plot_fnr_comparison(results_no_lca, results_lca, sex: str, save_path: str):
+def plot_fnr_comparison(results_no_lca, results_lca, results_reverse_lca, results_bilateral_lca,  sex: str, save_path: str):
     rates = results_no_lca["rates"]
 
     # Assign plotting labels
     target_fnr_no_lca = results_no_lca["female_fnr"] if sex == "F" else results_no_lca["male_fnr"]
     target_fnr_lca = results_lca["female_fnr"] if sex == "F" else results_lca["male_fnr"]
+    target_fnr_reverse_lca = results_reverse_lca["female_fnr"] if sex == "F" else results_reverse_lca["male_fnr"]
+    target_fnr_bilateral_lca = results_bilateral_lca["female_fnr"] if sex == "F" else results_bilateral_lca["male_fnr"]
 
     plt.figure(figsize=(7, 4))
 
     # Plot NLST (no LCA)
     plt.plot(rates, target_fnr_no_lca, label="NLST", color='blue', linestyle='dotted', marker='o')
     plt.plot(rates, results_no_lca["overall_fnr"], label="NLST (Overall)", color='blue', marker='o')
-
+    
     # Plot Synth-NLST (LCA applied)
     plt.plot(rates, target_fnr_lca, label="Synth-NLST", color='darkorange', linestyle='dotted', marker='x')
     plt.plot(rates, results_lca["overall_fnr"], label="Synth-NLST (Overall)", color='darkorange', marker='x')
-
-    # Also plot the other subgroup (just to match the original plotting behavior)
+    
+    # Plot Synth-Reverse-NLST (Reverse LCA applied)
+    plt.plot(rates, target_fnr_reverse_lca, label="Synth-Reverse-NLST", color='#FFDBBB', linestyle='dotted', marker='s')
+#     plt.plot(rates, results_reverse_lca["overall_fnr"], label="Synth-Reverse-NLST (Overall)", color='#FFDBBB', marker='s')
+    
+    # Plot Synth-Bilateral-NLST (Bilateral LCA applied)
+    plt.plot(rates, target_fnr_bilateral_lca, label="Synth-Bilateral-NLST", color='#C4A484', linestyle='dotted', marker='p')
+#     plt.plot(rates, results_bilateral_lca["overall_fnr"], label="Synth-Bilateral-NLST (Overall)", color='#C4A484', marker='p')
+    
+    # Also plot the other subgroup w/o LCA (just to match the original plotting behavior)
+    other_fnr_no_lca = results_no_lca["male_fnr"] if sex == "F" else results_no_lca["female_fnr"]
+    plt.plot(rates, other_fnr_no_lca, label="Opposite Gender (NLST)", color='#8B0000', linestyle='dotted', marker='x')
+    
+    # Also plot the other subgroup w/ LCA (just to match the original plotting behavior)
     other_fnr_lca = results_lca["male_fnr"] if sex == "F" else results_lca["female_fnr"]
-    plt.plot(rates, other_fnr_lca, label="Opposite Gender", color='darkred', linestyle='dotted', marker='x')
+    plt.plot(rates, other_fnr_lca, label="Opposite Gender (Synth-NLST)", color='#B22222', linestyle='dotted', marker='x')
+    
+    # Also plot the other subgroup w/ Reverse LCA (just to match the original plotting behavior)
+    other_fnr_reverse_lca = results_reverse_lca["male_fnr"] if sex == "F" else results_reverse_lca["female_fnr"]
+    plt.plot(rates, other_fnr_reverse_lca, label="Opposite Gender (Reverse)", color='#CD5C5C', linestyle='dotted', marker='x')
+    
+    # Also plot the other subgroup w/ Bilateral LCA (just to match the original plotting behavior)
+    other_fnr_bilateral_lca = results_bilateral_lca["male_fnr"] if sex == "F" else results_bilateral_lca["female_fnr"]
+    plt.plot(rates, other_fnr_bilateral_lca, label="Opposite Gender (Bilateral)", color='#F08080', linestyle='dotted', marker='x')
 
     # Fill areas
     plt.fill_between(rates, results_no_lca["overall_fnr"], target_fnr_no_lca, color='blue', alpha=0.05)
@@ -456,35 +522,35 @@ def reorder_columns(df):
 
     return df[cols]
 
-# # Apply to both train/test
-# train_df = fix_embedding_column(train_df)
-# test_df = fix_embedding_column(test_df)
-
-# # Apply to both dataframes
-# train_df = reorder_columns(train_df)
-# test_df = reorder_columns(test_df)
-
 
 #---- LCA ablation study -----
 if __name__ == "__main__":
     all_results = []
-
-    for strengths in range(1, 5):
-        strength = list(range(-1*strengths, strengths+1))
-        strength.remove(0)
-        print(f"Augmenting with {len(strength)+1}x strength...")
-
+    for strengths in range(1, 7):
+        strength = list(range(1,strengths+1))
+        reverse_strength = list(range((-1*strengths), 0))
+        bilateral_strength = list(range(-1*strengths, strengths+1))
+        bilateral_strength.remove(0)
+        print(f"LCA with {len(strength)+1}x strength...")
+        print(f"Bilateral with {len(bilateral_strength)+1}x strength...")
+        
         for sex in ["M", "F"]:
             # Run without LCA
             results_no_lca = run_poisoning_simulation(sex=sex, apply_lca=False)
 
             # Run with LCA
             results_lca = run_poisoning_simulation(sex=sex, apply_lca=True, strength=strength)
+            
+            # Run with Reverese LCA
+            results_reverse_lca = run_poisoning_simulation(sex=sex, apply_lca=True, strength=reverse_strength)
+            
+            # Run with Bilateral LCA
+            results_bilateral_lca = run_poisoning_simulation(sex=sex, apply_lca=True, strength=bilateral_strength)
 
             # ---- Store results ----
             for setting, results in zip(
-                ["no_lca", "lca"],
-                [results_no_lca, results_lca]
+                ["no_lca", "lca", "reverse_strength", "bilateral_strength"],
+                [results_no_lca, results_lca, results_reverse_lca, results_bilateral_lca]
             ):
                 for i, rate in enumerate(results["rates"]):
                     all_results.append({
@@ -501,17 +567,17 @@ if __name__ == "__main__":
                     })
 
             # ---- Save plots as before ----
-            save_file_fnr = f"results/{'female' if sex == 'F' else 'male'}_poisoning_LCA_fnr_strength={len(strength)}.png"
-            save_file_auc = f"results/{'female' if sex == 'F' else 'male'}_poisoning_LCA_auroc_strength={len(strength)}.png"
-            plot_fnr_comparison(results_no_lca, results_lca, sex, save_file_fnr)
+            save_file_fnr = f"results/{'female' if sex == 'F' else 'male'}_poisoning_LCA_fnr_strength={len(strength)+1}_PFI=False_RandGen=True.png"
+            save_file_auc = f"results/{'female' if sex == 'F' else 'male'}_poisoning_LCA_auroc_strength={len(strength)+1}_PFI=False_RandGen=True.png"
+            plot_fnr_comparison(results_no_lca, results_lca, results_reverse_lca, results_bilateral_lca, sex, save_file_fnr)
             plot_auroc_comparison(results_no_lca, results_lca, sex, save_file_auc)
 
         print("All plots generated successfully!")
 
-    # ---- Save all results as CSV at the end ----
+    #---- Save all results as CSV at the end ----
     df = pd.DataFrame(all_results)
-    df.to_csv("results/poisoning_ablation_results.csv", index=False)
-    print("All results saved to results/poisoning_ablation_results.csv")
+    df.to_csv("results/poisoning_ablation_results_PFI=False.csv", index=False)
+    print("All results saved to results/poisoning_ablation_results_PFI=False.csv")
 
     
 #     datasets = [train_df, test_df]
